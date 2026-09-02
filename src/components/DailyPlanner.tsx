@@ -34,7 +34,7 @@ export default function DailyPlanner({ teacherId }: { teacherId: string }) {
   const fetchData = async () => {
     setLoading(true);
     
-    // 1. שליפת מערכת בסיסית (כולל class_id)
+    // 1. שליפת מערכת בסיסית
     const { data: scheduleData } = await supabase.from('base_schedule').select('id, day_of_week, period, class_id, room, my_classes(class_name)').eq('teacher_id', teacherId);
     if (scheduleData) setBaseSchedule(scheduleData as unknown as BaseScheduleItem[]);
 
@@ -90,7 +90,7 @@ export default function DailyPlanner({ teacherId }: { teacherId: string }) {
         period: ev.period, 
         topic: ev.topic || '', 
         notes: ev.notes || '',
-        class_id: ev.class_id || null // שמירת זיהוי הכיתה במידה וזה שיעור דינמי
+        class_id: ev.class_id || null
       }));
       
     if (upsertData.length > 0) { 
@@ -116,11 +116,9 @@ export default function DailyPlanner({ teacherId }: { teacherId: string }) {
       const ev = dayEvents[p];
 
       if (ev && ev.class_id) {
-        // המורה שיבצה כיתה דינמית/חלופית לשעה זו ביומן
         const className = ev.my_classes?.class_name || classes.find(c => c.id === ev.class_id)?.class_name || 'כיתה לא ידועה';
         activeDailyPeriods.push({ period: p, class_id: ev.class_id, class_name: className, isExtra: true });
       } else if (baseCls) {
-        // שיעור מהמערכת הקבועה שלא נדרס
         activeDailyPeriods.push({ period: p, class_id: baseCls.class_id, class_name: baseCls.my_classes.class_name, isExtra: false });
       }
     }
@@ -192,7 +190,6 @@ export default function DailyPlanner({ teacherId }: { teacherId: string }) {
                   </>
                 )}
 
-                {/* אזור פעולות למטה */}
                 {!isWeekend && (
                   <div className="flex flex-col sm:flex-row justify-between items-center mt-8 gap-4">
                     <button 
@@ -210,8 +207,124 @@ export default function DailyPlanner({ teacherId }: { teacherId: string }) {
               </div>
             )}
 
-            {/* WEEKLY ו-MONTHLY נשארים כפי שהם... */}
-            {/* ... */}
+            {/* WEEKLY VIEW */}
+            {view === 'weekly' && (
+              <>
+                {/* Desktop Grid */}
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full min-w-[900px] border-collapse">
+                    <thead>
+                      <tr>
+                        <th className="p-3 bg-white w-16 border-b border-l border-slate-200"></th>
+                        {[1, 2, 3, 4, 5, 6].map(dayIdx => {
+                          const dateOfCol = new Date(getStartOfWeek(currentDate)); dateOfCol.setDate(dateOfCol.getDate() + dayIdx - 1);
+                          return (
+                            <th key={dayIdx} className="p-3 bg-slate-50 border border-slate-200 text-slate-700">
+                              {dayNames[dayIdx - 1]}<span className="block text-xs font-normal text-slate-400 mt-1">{dateOfCol.toLocaleDateString('he-IL', {day: '2-digit', month: '2-digit'})}</span>
+                            </th>
+                          );
+                        })}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[1,2,3,4,5,6,7,8,9,10].map(period => (
+                        <tr key={period}>
+                          <td className="p-2 text-center text-sm font-semibold text-slate-400 bg-slate-50 border-b border-l border-slate-200">{period}</td>
+                          {[1, 2, 3, 4, 5, 6].map(dayIdx => {
+                            const dateOfCol = new Date(getStartOfWeek(currentDate)); dateOfCol.setDate(dateOfCol.getDate() + dayIdx - 1);
+                            const cellEvent = events[formatDateForDB(dateOfCol)]?.[period];
+                            const baseClass = baseSchedule.find(s => s.day_of_week === dayIdx && s.period === period);
+                            
+                            // מזהה אם זה שיעור מהמערכת או דינמי
+                            const isExtra = cellEvent && cellEvent.class_id;
+                            const displayClassName = isExtra 
+                              ? (cellEvent.my_classes?.class_name || classes.find(c => c.id === cellEvent.class_id)?.class_name) 
+                              : baseClass?.my_classes.class_name;
+
+                            return (
+                              <td key={dayIdx} className="p-2 border border-slate-200 h-24 align-top">
+                                {displayClassName ? (
+                                  <div className={`rounded-lg p-2 h-full flex flex-col ${isExtra ? 'bg-amber-50 border border-amber-200' : 'bg-indigo-50/40'}`}>
+                                    <span className={`font-bold text-sm ${isExtra ? 'text-amber-800' : 'text-indigo-700'}`}>{displayClassName}</span>
+                                    {cellEvent?.topic && <span className="text-xs text-slate-700 mt-1 line-clamp-2">{cellEvent.topic}</span>}
+                                  </div>
+                                ) : null}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                
+                {/* Mobile Vertical List */}
+                <div className="md:hidden space-y-6 pb-20">
+                  {[1, 2, 3, 4, 5, 6].map(dayIdx => {
+                    const dateOfCol = new Date(getStartOfWeek(currentDate)); dateOfCol.setDate(dateOfCol.getDate() + dayIdx - 1);
+                    const dayEvents = events[formatDateForDB(dateOfCol)] || {};
+                    
+                    // בניה ומיזוג לאותו יום בנייד
+                    const dailyBase = baseSchedule.filter(s => s.day_of_week === dayIdx);
+                    const mergedDay = [];
+                    for (let p = 1; p <= 10; p++) {
+                      const baseCls = dailyBase.find(s => s.period === p);
+                      const ev = dayEvents[p];
+                      if (ev && ev.class_id) {
+                        mergedDay.push({ period: p, class_name: ev.my_classes?.class_name || classes.find(c => c.id === ev.class_id)?.class_name, isExtra: true, topic: ev.topic });
+                      } else if (baseCls) {
+                        mergedDay.push({ period: p, class_name: baseCls.my_classes.class_name, isExtra: false, topic: ev?.topic });
+                      }
+                    }
+
+                    return (
+                      <div key={dayIdx} className="bg-slate-50/50 rounded-3xl border border-slate-100 p-4">
+                        <div className="flex justify-between items-end mb-4 border-b border-slate-200 pb-2">
+                          <h3 className="font-bold text-lg text-slate-800">יום {dayNames[dayIdx - 1]}</h3>
+                          <span className="text-sm text-slate-400">{dateOfCol.toLocaleDateString('he-IL', {day: '2-digit', month: '2-digit'})}</span>
+                        </div>
+                        {mergedDay.length === 0 ? (
+                          <p className="text-sm text-slate-400 text-center py-4">אין שיעורים</p>
+                        ) : (
+                          <div className="space-y-3">
+                            {mergedDay.map(cls => (
+                                <div key={cls.period} className={`flex gap-3 bg-white p-3 rounded-2xl shadow-sm border ${cls.isExtra ? 'border-amber-200' : 'border-slate-100'}`}>
+                                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold ${cls.isExtra ? 'bg-amber-100 text-amber-700' : 'bg-indigo-50 text-indigo-600'}`}>{cls.period}</div>
+                                  <div className="flex-1">
+                                    <p className={`font-bold ${cls.isExtra ? 'text-amber-900' : 'text-slate-800'}`}>{cls.class_name} {cls.isExtra && <span className="text-[10px] bg-amber-400 text-amber-900 px-1 rounded ml-1">דינמי</span>}</p>
+                                    <p className={`text-xs mt-1 ${cls.topic ? 'text-slate-600' : 'text-slate-400 italic'}`}>{cls.topic || 'לא תוכנן נושא'}</p>
+                                  </div>
+                                </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {/* MONTHLY VIEW (Overview) */}
+            {view === 'monthly' && (
+              <div className="grid grid-cols-7 gap-1 sm:gap-2 pb-20">
+                {dayNames.map(day => <div key={day} className="text-center font-bold text-[10px] sm:text-sm text-slate-400 py-1 sm:py-2">{day}</div>)}
+                {Array.from({ length: getStartOfMonth(currentDate).getDay() }).map((_, i) => <div key={`empty-${i}`} className="h-16 sm:h-28 bg-slate-50/50 rounded-xl border border-transparent"></div>)}
+                {Array.from({ length: new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate() }).map((_, i) => {
+                  const currentDay = new Date(currentDate.getFullYear(), currentDate.getMonth(), i + 1);
+                  const dateStr = formatDateForDB(currentDay);
+                  const dayEvents = events[dateStr];
+                  const plannedCount = dayEvents ? Object.values(dayEvents).filter(e => e.topic).length : 0;
+                  const isToday = formatDateForDB(new Date()) === dateStr;
+                  return (
+                    <div key={i} onClick={() => { setCurrentDate(currentDay); setView('daily'); }} className={`h-16 sm:h-28 p-1 sm:p-2 rounded-xl sm:rounded-2xl border transition-all cursor-pointer flex flex-col ${isToday ? 'border-indigo-500 bg-indigo-50/30' : 'border-slate-100 bg-white hover:border-indigo-300'}`}>
+                      <span className={`text-xs sm:text-sm font-bold w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-full mb-1 sm:mb-2 ${isToday ? 'bg-indigo-600 text-white' : 'text-slate-600'}`}>{i + 1}</span>
+                      {plannedCount > 0 && <span className="mt-auto text-[9px] sm:text-xs font-medium text-indigo-600 bg-indigo-100 px-1 sm:px-2 py-0.5 sm:py-1 rounded-md text-center truncate">{plannedCount} ש׳</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </>
         )}
       </div>
