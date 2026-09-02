@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Heebo } from "next/font/google";
 import "./globals.css";
 
@@ -9,13 +9,25 @@ const heebo = Heebo({
   display: 'swap',
 });
 
+// הגדרת המטא-דאטה, חיבור למניפסט, התאמה לאייפון ושמירה על האייקונים שלך
 export const metadata: Metadata = {
   title: "ClassKim | הפלאנר החכם למורים",
   description: "מערכת תכנון, ניהול ומעקב חכמה, המעוצבת במיוחד למורים שרוצים לעשות סדר בבלאגן.",
-  icons: {
-    icon: '/icon.png', // נתיב לקובץ ששמנו בתיקיית public
-    apple: '/icon.png', // מוודא שזה ייראה טוב גם כששומרים את האתר כמסך בית באייפון
+  manifest: '/manifest.json',
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'default',
+    title: 'ClassKim',
   },
+  icons: {
+    icon: '/icon.png',
+    apple: '/icon.png',
+  },
+};
+
+// צבע שורת הסטטוס (בטריה/שעון) בנייד
+export const viewport: Viewport = {
+  themeColor: '#4f46e5',
 };
 
 export default function RootLayout({
