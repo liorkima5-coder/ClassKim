@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { Loader2, ChevronRight, ChevronLeft, Save, Calendar as CalendarIcon, CalendarDays, LayoutTemplate, Printer, Plus, X } from 'lucide-react';
+import { Loader2, ChevronRight, ChevronLeft, Save, Calendar as CalendarIcon, CalendarDays, LayoutTemplate, Printer, Plus, X, CheckCircle2 } from 'lucide-react';
 
 interface BaseScheduleItem { id: string; day_of_week: number; period: number; class_id: string; room: string | null; my_classes: { class_name: string }; }
 interface PlannerEvent { id?: string; date: string; period: number; topic: string; notes: string; class_id?: string; my_classes?: { class_name: string }; }
@@ -14,6 +14,7 @@ export default function DailyPlanner({ teacherId }: { teacherId: string }) {
   const [view, setView] = useState<ViewMode>('daily');
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
   
   const [baseSchedule, setBaseSchedule] = useState<BaseScheduleItem[]>([]);
   const [events, setEvents] = useState<Record<string, Record<number, PlannerEvent>>>({});
@@ -49,7 +50,13 @@ export default function DailyPlanner({ teacherId }: { teacherId: string }) {
     // 3. שליפת האירועים ביומן (כולל class_id במקרה של שיעורים דינמיים)
     const { data: eventsData } = await supabase.from('planner_events').select('*, my_classes(class_name)').eq('teacher_id', teacherId).gte('date', formatDateForDB(startDate)).lte('date', formatDateForDB(endDate));
     const eventsMap: Record<string, Record<number, PlannerEvent>> = {};
-    if (eventsData) { eventsData.forEach((ev: any) => { if (!eventsMap[ev.date]) eventsMap[ev.date] = {}; eventsMap[ev.date][ev.period] = ev; }); }
+    if (eventsData) { 
+      eventsData.forEach((ev: any) => { 
+        const dateKey = typeof ev.date === 'string' ? ev.date.split('T')[0] : ev.date;
+        if (!eventsMap[dateKey]) eventsMap[dateKey] = {}; 
+        eventsMap[dateKey][ev.period] = { ...ev, date: dateKey }; 
+      }); 
+    }
     setEvents(eventsMap); setLoading(false);
   };
 
@@ -95,9 +102,16 @@ export default function DailyPlanner({ teacherId }: { teacherId: string }) {
       
     if (upsertData.length > 0) { 
       const { error } = await supabase.from('planner_events').upsert(upsertData, { onConflict: 'teacher_id,date,period' }); 
-      if (error) alert('שגיאה בשמירה: ' + error.message); 
+      if (error) {
+        alert('שגיאה בשמירה: ' + error.message);
+        setIsSaving(false);
+        return;
+      }
     }
+    await fetchData();
     setIsSaving(false);
+    setSaveSuccess(true);
+    setTimeout(() => setSaveSuccess(false), 2500);
   };
 
   const changeDate = (amount: number) => { const newDate = new Date(currentDate); if (view === 'daily') newDate.setDate(newDate.getDate() + amount); if (view === 'weekly') newDate.setDate(newDate.getDate() + (amount * 7)); if (view === 'monthly') newDate.setMonth(newDate.getMonth() + amount); setCurrentDate(newDate); };
@@ -199,8 +213,13 @@ export default function DailyPlanner({ teacherId }: { teacherId: string }) {
                       <Plus className="w-5 h-5" /> שיבוץ דינמי (החלפה / מילוי מקום)
                     </button>
                     
-                    <button onClick={saveDailyPlanner} disabled={isSaving} className="shadow-2xl shadow-indigo-300/50 bg-indigo-600 text-white px-8 py-4 rounded-full font-bold flex items-center justify-center gap-3 w-full sm:w-auto active:scale-95 transition-all">
-                      {isSaving ? <Loader2 className="w-6 h-6 animate-spin" /> : <Save className="w-6 h-6" />} שמור תכנון יומי
+                    <button 
+                      onClick={saveDailyPlanner} 
+                      disabled={isSaving || saveSuccess} 
+                      className={`shadow-2xl px-8 py-4 rounded-full font-bold flex items-center justify-center gap-3 w-full sm:w-auto active:scale-95 transition-all ${saveSuccess ? 'bg-emerald-500 text-white shadow-emerald-300/50' : 'bg-indigo-600 text-white shadow-indigo-300/50'}`}
+                    >
+                      {isSaving ? <Loader2 className="w-6 h-6 animate-spin" /> : saveSuccess ? <CheckCircle2 className="w-6 h-6" /> : <Save className="w-6 h-6" />} 
+                      {saveSuccess ? 'נשמר בהצלחה!' : 'שמור תכנון יומי'}
                     </button>
                   </div>
                 )}
