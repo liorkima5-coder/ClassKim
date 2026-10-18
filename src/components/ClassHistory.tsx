@@ -1,177 +1,98 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
-import { Loader2, Search, History, BookOpen, Calendar as CalendarIcon, Clock } from 'lucide-react';
-
-interface ClassItem {
-  id: string;
-  class_name: string;
-}
-
-interface HistoryEvent {
-  date: string;
-  period: number;
-  topic: string;
-  notes: string;
-}
+import { classColor, dayOfWeek, fromDateKey, type BaseScheduleItem, type ClassItem, type PlannerEvent } from '../lib/planner';
+import { Panel, PanelHeader, Spinner, EmptyState, ErrorNote, inputClass } from './ui';
+import { History, BookOpen } from 'lucide-react';
 
 export default function ClassHistory({ teacherId }: { teacherId: string }) {
   const [classes, setClasses] = useState<ClassItem[]>([]);
   const [selectedClassId, setSelectedClassId] = useState<string>('');
-  const [history, setHistory] = useState<HistoryEvent[]>([]);
+  const [schedule, setSchedule] = useState<BaseScheduleItem[]>([]);
+  const [events, setEvents] = useState<PlannerEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  // 1. שליפת רשימת הכיתות הקיימות כדי לאכלס את התפריט הנגלל
-  useEffect(() => {
-    const initClasses = async () => {
-      const { data } = await supabase
-        .from('my_classes')
-        .select('*')
-        .eq('teacher_id', teacherId)
-        .order('created_at', { ascending: true });
-        
-      if (data && data.length > 0) {
-        setClasses(data);
-        setSelectedClassId(data[0].id); // בחירת הכיתה הראשונה כברירת מחדל
-      } else {
-        setLoading(false);
-      }
-    };
-    initClasses();
+  const fetchAll = useCallback(async () => {
+    const [classesRes, scheduleRes, eventsRes] = await Promise.all([
+      supabase.from('my_classes').select('id, class_name').eq('teacher_id', teacherId).order('created_at', { ascending: true }),
+      supabase.from('base_schedule').select('id, day_of_week, period, class_id, room').eq('teacher_id', teacherId),
+      supabase.from('planner_events').select('date, period, topic, notes, class_id').eq('teacher_id', teacherId).order('date', { ascending: false }).order('period', { ascending: false }),
+    ]);
+    if (classesRes.error || scheduleRes.error || eventsRes.error) setError('חלק מהנתונים לא נטענו. רענני את הדף כדי לנסות שוב.');
+
+    const classList = (classesRes.data ?? []) as ClassItem[];
+    setClasses(classList);
+    setSelectedClassId(prev => prev || classList[0]?.id || '');
+    setSchedule((scheduleRes.data ?? []) as BaseScheduleItem[]);
+    setEvents((eventsRes.data ?? []) as PlannerEvent[]);
+    setLoading(false);
   }, [teacherId]);
 
-  // 2. שליפת ההיסטוריה בכל פעם שמשנים כיתה
   useEffect(() => {
-    if (!selectedClassId) return;
-    fetchClassHistory();
-  }, [selectedClassId]);
+    const load = async () => { await fetchAll(); };
+    load();
+  }, [fetchAll]);
 
-  const fetchClassHistory = async () => {
-    setLoading(true);
+  const knownIds = new Set(classes.map(c => c.id));
 
-    // א. שליפת מערכת השעות של הכיתה הספציפית (באילו ימים ושעות היא לומדת?)
-    const { data: scheduleData } = await supabase
-      .from('base_schedule')
-      .select('day_of_week, period')
-      .eq('class_id', selectedClassId);
+  /*
+    לכל שיעור שנרשם ביומן קובעים לאיזו כיתה הוא שייך:
+    1. אם נשמרה כיתה עם השיעור – זו הכיתה (כולל החלפות ושיעורים חד-פעמיים).
+    2. רשומות ישנות בלי כיתה שמורה – משייכים לפי המערכת הקבועה של אותו יום ושעה.
+  */
+  const history = events.filter(ev => {
+    if (!ev.topic?.trim() && !ev.notes?.trim()) return false;
+    if (ev.class_id && knownIds.has(ev.class_id)) return ev.class_id === selectedClassId;
+    const dow = dayOfWeek(fromDateKey(ev.date));
+    return schedule.some(s => s.class_id === selectedClassId && s.day_of_week === dow && s.period === ev.period);
+  });
 
-    const scheduleMap = scheduleData || [];
+  const formatDate = (key: string) =>
+    fromDateKey(key).toLocaleDateString('he-IL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
-    // ב. שליפת כל השיעורים של המורה שיש בהם תוכן כלשהו
-    const { data: eventsData } = await supabase
-      .from('planner_events')
-      .select('date, period, topic, notes')
-      .eq('teacher_id', teacherId)
-      .order('date', { ascending: false });
-
-    if (eventsData) {
-      // ג. סינון (בצד הלקוח) - רק שיעורים שנופלים על היום והשעה של הכיתה הזו
-      const classEvents = eventsData.filter(ev => {
-        // התעלמות משיעורים ריקים
-        if (!ev.topic?.trim() && !ev.notes?.trim()) return false;
-        
-        // חילוץ מדויק של היום בשבוע מתוך התאריך (YYYY-MM-DD)
-        const [year, month, day] = ev.date.split('-');
-        const dateObj = new Date(Number(year), Number(month) - 1, Number(day));
-        const dayOfWeek = dateObj.getDay() + 1;
-
-        // בדיקה האם השיעור הזה תואם למערכת של הכיתה
-        return scheduleMap.some(s => s.day_of_week === dayOfWeek && s.period === ev.period);
-      });
-
-      setHistory(classEvents);
-    }
-    
-    setLoading(false);
-  };
-
-  const formatDate = (dateString: string) => {
-    const [year, month, day] = dateString.split('-');
-    const date = new Date(Number(year), Number(month) - 1, Number(day));
-    return date.toLocaleDateString('he-IL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-  };
+  const selected = classes.find(c => c.id === selectedClassId);
 
   return (
-    <div className="bg-white rounded-3xl shadow-lg shadow-slate-200/50 border border-slate-200 p-8 min-h-[500px]">
-      
-      {/* כותרת ובחירת כיתה */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-10 border-b border-slate-100 pb-6">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-            <History className="w-6 h-6 text-indigo-600" />
-            מעקב הספק והיסטוריית כיתה
-          </h2>
-          <p className="text-slate-500 mt-1">בחר כיתה כדי לראות את כל מה שלימדת אותה עד היום</p>
-        </div>
-
+    <Panel className="min-h-[28rem]">
+      <PanelHeader icon={History} title="מה לימדתי כל כיתה" description="כל השיעורים שנרשמו ביומן לכיתה, מהאחרון לראשון.">
         {classes.length > 0 && (
-          <div className="relative w-full md:w-64">
-            <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-400">
-              <Search className="w-4 h-4" />
-            </div>
-            <select
-              value={selectedClassId}
-              onChange={(e) => setSelectedClassId(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 text-slate-800 text-sm rounded-xl focus:ring-2 focus:ring-indigo-500 block pr-10 p-3 outline-none appearance-none font-medium"
-            >
-              {classes.map(cls => (
-                <option key={cls.id} value={cls.id}>{cls.class_name}</option>
-              ))}
+          <div className="w-full sm:w-56">
+            <label htmlFor="history-class" className="sr-only">בחירת כיתה</label>
+            <select id="history-class" value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)} className={`${inputClass} font-semibold`}>
+              {classes.map(c => <option key={c.id} value={c.id}>{c.class_name}</option>)}
             </select>
           </div>
         )}
-      </div>
+      </PanelHeader>
 
-      {/* תצוגת הנתונים */}
-      {classes.length === 0 ? (
-        <div className="text-center py-20 text-slate-400 flex flex-col items-center">
-          <BookOpen className="w-12 h-12 mb-4 opacity-20" />
-          <p className="text-lg">עוד לא הוספת כיתות למערכת.</p>
-        </div>
-      ) : loading ? (
-        <div className="flex justify-center py-20"><Loader2 className="w-10 h-10 animate-spin text-indigo-600" /></div>
+      {error && <div className="mb-4"><ErrorNote>{error}</ErrorNote></div>}
+
+      {loading ? <Spinner /> : classes.length === 0 ? (
+        <EmptyState icon={BookOpen} title="עוד אין כיתות">מוסיפים כיתות בלשונית ההגדרות, ואז כל שיעור שנרשם ביומן יופיע כאן.</EmptyState>
       ) : history.length === 0 ? (
-        <div className="text-center py-20 bg-slate-50 rounded-2xl border border-dashed border-slate-200 text-slate-500">
-          <History className="w-10 h-10 mx-auto mb-3 opacity-20" />
-          <p className="font-medium text-lg">אין היסטוריה להציג.</p>
-          <p className="text-sm mt-1">עדיין לא תוכננו שיעורים לכיתה זו ביומן.</p>
-        </div>
+        <EmptyState icon={History} title={`עוד לא נרשמו שיעורים ל${selected?.class_name ?? 'כיתה'}`}>
+          כשכותבים נושא או הערה לשיעור ביומן ושומרים, הוא מופיע כאן.
+        </EmptyState>
       ) : (
-        <div className="relative border-r-2 border-indigo-100 pr-6 space-y-8 mt-4 mr-2">
-          {history.map((item, index) => (
-            <div key={`${item.date}-${item.period}`} className="relative group">
-              {/* נקודת ציר הזמן */}
-              <div className="absolute -right-[33px] top-1.5 w-4 h-4 rounded-full bg-indigo-200 border-4 border-white shadow-sm group-hover:bg-indigo-500 transition-colors"></div>
-              
-              {/* כרטיסיית השיעור */}
-              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 hover:border-indigo-100 hover:shadow-md transition-all">
-                <div className="flex flex-wrap items-center gap-4 text-xs font-semibold text-slate-500 mb-3 bg-slate-50 p-2 rounded-lg inline-flex">
-                  <span className="flex items-center gap-1 text-indigo-700">
-                    <CalendarIcon className="w-3.5 h-3.5" />
-                    {formatDate(item.date)}
-                  </span>
-                  <span className="text-slate-300">|</span>
-                  <span className="flex items-center gap-1 text-slate-600">
-                    <Clock className="w-3.5 h-3.5" />
-                    שיעור {item.period}
-                  </span>
-                </div>
-                
-                <h3 className="text-lg font-bold text-slate-800 mb-2">
-                  {item.topic || 'ללא נושא'}
-                </h3>
-                
-                {item.notes && (
-                  <p className="text-slate-600 text-sm whitespace-pre-wrap leading-relaxed bg-slate-50/50 p-3 rounded-xl border border-slate-100/50">
-                    {item.notes}
-                  </p>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
+        <>
+          <p className="mb-4 text-sm text-ink-soft">
+            <span className={`me-2 inline-block rounded border px-1.5 font-bold ${classColor(classes, selectedClassId).chip}`}>{selected?.class_name}</span>
+            {history.length} שיעורים נרשמו
+          </p>
+          <ol className="relative space-y-4 border-s-2 border-line ps-6">
+            {history.map(item => (
+              <li key={`${item.date}-${item.period}`} className="relative">
+                <span className={`absolute -start-[1.95rem] top-2 h-3 w-3 rounded-full ring-4 ring-surface ${classColor(classes, selectedClassId).dot}`} aria-hidden />
+                <p className="text-sm text-ink-soft">{formatDate(item.date)} · שיעור {item.period}</p>
+                <p className="mt-0.5 font-display text-lg font-semibold text-ink">{item.topic || 'בלי נושא'}</p>
+                {item.notes && <p className="mt-1 max-w-prose whitespace-pre-wrap leading-relaxed text-ink-soft">{item.notes}</p>}
+              </li>
+            ))}
+          </ol>
+        </>
       )}
-    </div>
+    </Panel>
   );
 }

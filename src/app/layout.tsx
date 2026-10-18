@@ -1,33 +1,39 @@
 import type { Metadata, Viewport } from "next";
-import { Heebo } from "next/font/google";
+import { Assistant, Rubik } from "next/font/google";
 import "./globals.css";
 
-// הוספת פונט עברי מודרני ונקי
-const heebo = Heebo({ 
-  subsets: ["hebrew"],
-  weight: ['300', '400', '500', '700', '900'],
-  display: 'swap',
+// Rubik לכותרות (עגול וידידותי), Assistant לטקסט רץ (קריא במיוחד בעברית)
+const rubik = Rubik({
+  subsets: ["hebrew", "latin"],
+  weight: ["500", "600", "700"],
+  variable: "--font-rubik",
+  display: "swap",
 });
 
-// הגדרת המטא-דאטה, חיבור למניפסט, התאמה לאייפון ושמירה על האייקונים שלך
+const assistant = Assistant({
+  subsets: ["hebrew", "latin"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-assistant",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
-  title: "ClassKim | הפלאנר החכם למורים",
-  description: "מערכת תכנון, ניהול ומעקב חכמה, המעוצבת במיוחד למורים שרוצים לעשות סדר בבלאגן.",
-  manifest: '/manifest.json',
+  title: "ClassKim | הפלאנר למורים",
+  description: "מערכת שעות, יומן שיעורים ומעקב הספק לכל כיתה, במקום אחד.",
+  manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
-    statusBarStyle: 'default',
-    title: 'ClassKim',
+    statusBarStyle: "default",
+    title: "ClassKim",
   },
   icons: {
-    icon: '/icon.png',
-    apple: '/icon.png',
+    icon: "/icon.png",
+    apple: "/icon.png",
   },
 };
 
-// צבע שורת הסטטוס (בטריה/שעון) בנייד
 export const viewport: Viewport = {
-  themeColor: '#4f46e5',
+  themeColor: "#2b7a6f",
 };
 
 export default function RootLayout({
@@ -36,9 +42,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="he" dir="rtl">
-      {/* רקע גלובלי עם גרדיאנט עדין וטקסטראלי שמשפר מיד את המראה של כל הדפים */}
-      <body className={`${heebo.className} bg-slate-50 text-slate-900 selection:bg-indigo-200 selection:text-indigo-900 min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-indigo-50/50 via-slate-50 to-slate-100`}>
+    <html lang="he" dir="rtl" className={`${rubik.variable} ${assistant.variable}`}>
+      <body className="font-sans bg-paper text-ink min-h-screen antialiased selection:bg-marker-100 selection:text-ink">
         {children}
       </body>
     </html>

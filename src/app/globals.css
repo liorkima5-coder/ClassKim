@@ -1,26 +1,79 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+  ClassKim design tokens
+  A light "exercise book" palette: cool paper, navy ink, a calm board-green
+  for actions and a marker yellow for one-off (dynamic) lessons.
+*/
+@theme {
+  --font-sans: var(--font-assistant), system-ui, sans-serif;
+  --font-display: var(--font-rubik), var(--font-assistant), system-ui, sans-serif;
+
+  --color-paper: #f5f7fa;
+  --color-surface: #ffffff;
+  --color-ink: #1d2b3a;
+  --color-ink-soft: #5a6b7d;
+  --color-ink-faint: #8a98a8;
+  --color-line: #dfe6ee;
+  --color-line-soft: #edf1f5;
+
+  --color-brand-50: #ecf6f4;
+  --color-brand-100: #d3ebe6;
+  --color-brand-200: #a9d6cd;
+  --color-brand-500: #34897d;
+  --color-brand-600: #2b7a6f;
+  --color-brand-700: #22635a;
+  --color-brand-800: #1b4f48;
+
+  --color-marker-50: #fffaeb;
+  --color-marker-100: #fff1b8;
+  --color-marker-400: #e9b730;
+  --color-marker-700: #8a6510;
+
+  --color-margin: #e8908a;
+  --color-rule: #d6e4f2;
+
+  --color-danger: #c2453d;
+  --color-danger-50: #fdf1f0;
+  --color-success: #2f8a57;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  background: var(--color-paper);
+  color-scheme: light;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+
+/* Visible keyboard focus everywhere */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+}
+
+/* Lined exercise-book page, used on the landing preview */
+.notebook-page {
+  background-color: #fff;
+  background-image:
+    linear-gradient(to left, transparent 2.75rem, var(--color-margin) 2.75rem, var(--color-margin) calc(2.75rem + 1.5px), transparent calc(2.75rem + 1.5px)),
+    repeating-linear-gradient(to bottom, transparent 0, transparent 2.25rem, var(--color-rule) 2.25rem, var(--color-rule) calc(2.25rem + 1px));
+}
+
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { scrollbar-width: none; }
+
+.pb-safe { padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  html, body { background: #fff; }
 }
