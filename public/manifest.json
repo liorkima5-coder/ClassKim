@@ -4,8 +4,8 @@
   "description": "הפלאנר החכם למורים",
   "start_url": "/dashboard",
   "display": "standalone",
-  "background_color": "#f8fafc",
-  "theme_color": "#4f46e5",
+  "background_color": "#f5f7fa",
+  "theme_color": "#2b7a6f",
   "dir": "rtl",
   "lang": "he",
   "icons": [

@@ -2,38 +2,54 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import type { User } from '@supabase/supabase-js';
 import { supabase } from '../../lib/supabase';
-import { Loader2, BookOpen, Sun, CalendarDays, History, Settings, LogOut } from 'lucide-react';
+import { enforceRememberChoice } from '../../lib/session';
+import type { TeacherProfile } from '../../lib/planner';
+import { Spinner, ErrorNote, inputClass, labelClass, primaryButton, iconButton } from '../../components/ui';
+import { Loader2, Sun, CalendarDays, History, Settings, LogOut } from 'lucide-react';
 import ClassesManager from '../../components/ClassesManager';
 import BaseSchedule from '../../components/BaseSchedule';
 import DailyPlanner from '../../components/DailyPlanner';
 import OverviewDashboard from '../../components/OverviewDashboard';
 import ClassHistory from '../../components/ClassHistory';
+import ProfileSettings, { DaysOffPicker } from '../../components/ProfileSettings';
+
+type Tab = 'overview' | 'planner' | 'history' | 'settings';
+
+const TABS: { id: Tab; label: string; icon: typeof Sun }[] = [
+  { id: 'overview', label: 'היום', icon: Sun },
+  { id: 'planner', label: 'יומן', icon: CalendarDays },
+  { id: 'history', label: 'הספק', icon: History },
+  { id: 'settings', label: 'הגדרות', icon: Settings },
+];
 
 export default function DashboardPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
-  const [user, setUser] = useState<any>(null);
-  const [hasProfile, setHasProfile] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'planner' | 'history' | 'settings'>('overview');
+  const [user, setUser] = useState<User | null>(null);
+  const [profile, setProfile] = useState<TeacherProfile | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const [plannerDirty, setPlannerDirty] = useState(false);
+  const [classesVersion, setClassesVersion] = useState(0);
 
+  // טופס פרופיל ראשוני
   const [fullName, setFullName] = useState('');
   const [mainSubject, setMainSubject] = useState('');
-  const [daysOff, setDaysOff] = useState<number[]>([]); 
+  const [daysOff, setDaysOff] = useState<number[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [profileError, setProfileError] = useState('');
 
   useEffect(() => {
     const checkUserAndProfile = async () => {
+      if (await enforceRememberChoice()) return router.replace('/');
       const { data: { user: currentUser }, error: authError } = await supabase.auth.getUser();
-      if (authError || !currentUser) return router.push('/');
+      if (authError || !currentUser) return router.replace('/');
       setUser(currentUser);
       if (currentUser.user_metadata?.full_name) setFullName(currentUser.user_metadata.full_name);
-      
-      const { data: teacherProfile } = await supabase.from('teachers').select('*').eq('id', currentUser.id).single();
-      if (teacherProfile) {
-        setHasProfile(true);
-        setFullName(teacherProfile.full_name); 
-      }
+
+      const { data: teacherProfile } = await supabase.from('teachers').select('id, full_name, main_subject, days_off').eq('id', currentUser.id).maybeSingle();
+      if (teacherProfile) setProfile(teacherProfile as TeacherProfile);
       setLoading(false);
     };
     checkUserAndProfile();
@@ -41,90 +57,123 @@ export default function DashboardPage() {
 
   const handleCreateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !user.id) return;
+    if (!user) return;
     setIsSubmitting(true);
-    const { error } = await supabase.from('teachers').insert([{ id: user.id, full_name: fullName, main_subject: mainSubject, days_off: daysOff }]);
-    if (error) { alert('שגיאה בשמירת הנתונים.'); setIsSubmitting(false); return; }
-    setHasProfile(true);
+    setProfileError('');
+    const newProfile: TeacherProfile = { id: user.id, full_name: fullName.trim(), main_subject: mainSubject.trim() || null, days_off: daysOff };
+    const { error } = await supabase.from('teachers').insert([newProfile]);
     setIsSubmitting(false);
+    if (error) {
+      setProfileError('הפרטים לא נשמרו. בדקי את החיבור ונסי שוב.');
+      return;
+    }
+    setProfile(newProfile);
+    setActiveTab('settings'); // בפעם הראשונה מתחילים בהגדרת כיתות ומערכת
   };
 
-  const handleLogout = () => supabase.auth.signOut().then(() => router.push('/'));
+  const changeTab = (tab: Tab) => {
+    if (tab === activeTab) return;
+    if (plannerDirty && !confirm('יש שינויים ביומן שלא נשמרו. לעבור בכל זאת?')) return;
+    setPlannerDirty(false);
+    setActiveTab(tab);
+  };
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-indigo-600" /></div>;
+  const handleLogout = async () => {
+    if (plannerDirty && !confirm('יש שינויים ביומן שלא נשמרו. להתנתק בכל זאת?')) return;
+    await supabase.auth.signOut();
+    router.replace('/');
+  };
 
-  if (!hasProfile) {
+  if (loading) return <Spinner className="min-h-screen items-center" />;
+
+  if (!profile) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4" dir="rtl">
-        {/* טופס הרשמה - נשאר זהה */}
-        <div className="max-w-md w-full bg-white rounded-3xl shadow-xl p-8 border border-slate-100">
-          <div className="text-center mb-6">
-            <h2 className="text-2xl font-bold text-slate-800">הגדרת פרופיל מורה</h2>
-            <p className="text-slate-500 mt-2">כדי להתחיל, נגדיר את המערכת האישית שלך</p>
-          </div>
-          <form onSubmit={handleCreateProfile} className="space-y-5">
-            <div><label className="block text-sm font-medium mb-1">שם מלא</label><input type="text" required value={fullName} onChange={(e) => setFullName(e.target.value)} className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none" /></div>
-            <div><label className="block text-sm font-medium mb-1">מקצוע עיקרי</label><input type="text" required value={mainSubject} onChange={(e) => setMainSubject(e.target.value)} className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none" /></div>
-            <button type="submit" disabled={isSubmitting} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold flex justify-center items-center gap-2">{isSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : 'שמור והיכנס לפלאנר'}</button>
+      <main className="flex min-h-screen items-center justify-center p-4">
+        <div className="w-full max-w-lg rounded-2xl border border-line bg-surface p-6 sm:p-8">
+          <h1 className="font-display text-2xl font-semibold">נעים להכיר</h1>
+          <p className="mt-1 text-ink-soft">כמה פרטים קצרים, ואחר כך נגדיר יחד את הכיתות ואת מערכת השעות.</p>
+          <form onSubmit={handleCreateProfile} className="mt-6 space-y-5">
+            <div>
+              <label htmlFor="full-name" className={labelClass}>שם מלא</label>
+              <input id="full-name" required value={fullName} onChange={e => setFullName(e.target.value)} className={inputClass} />
+            </div>
+            <div>
+              <label htmlFor="subject" className={labelClass}>מקצוע עיקרי</label>
+              <input id="subject" value={mainSubject} onChange={e => setMainSubject(e.target.value)} className={inputClass} placeholder="למשל: מתמטיקה, אמנות, חינוך" />
+            </div>
+            <DaysOffPicker value={daysOff} onChange={setDaysOff} />
+            {profileError && <ErrorNote>{profileError}</ErrorNote>}
+            <button type="submit" disabled={isSubmitting || !fullName.trim()} className={`${primaryButton} w-full`}>
+              {isSubmitting && <Loader2 className="h-5 w-5 animate-spin" />}
+              שמירה והמשך
+            </button>
           </form>
         </div>
-      </div>
+      </main>
     );
   }
 
-  const tabs = [
-    { id: 'overview', label: 'בוקר טוב', icon: Sun },
-    { id: 'planner', label: 'יומן שיעורים', icon: CalendarDays },
-    { id: 'history', label: 'היסטוריה', icon: History },
-    { id: 'settings', label: 'הגדרות', icon: Settings }
-  ];
+  const firstName = profile.full_name.split(' ')[0];
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-24 md:pb-8 p-4 sm:p-8 print:bg-white print:p-0" dir="rtl">
-      
-      {/* Header - בטלפון מציג רק לוגו והתנתקות */}
-      <header className="max-w-6xl mx-auto mb-6 md:mb-8 flex justify-between items-center bg-white p-4 rounded-2xl shadow-sm border border-slate-100 print:hidden">
-        <div className="flex items-center gap-3">
-          <div className="bg-indigo-100 p-2.5 rounded-xl"><BookOpen className="w-5 h-5 text-indigo-600" /></div>
-          <h1 className="text-lg md:text-xl font-bold text-slate-800">הפלאנר של {fullName}</h1>
-        </div>
-        
-        {/* טאבים למסך גדול בלבד */}
-        <div className="hidden md:flex bg-slate-100 p-1 rounded-xl mx-4">
-          {tabs.map(tab => (
-            <button key={tab.id} onClick={() => setActiveTab(tab.id as any)} className={`px-4 py-2 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${activeTab === tab.id ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-700'}`}>
-              <tab.icon className="w-4 h-4" /> {tab.label}
-            </button>
-          ))}
-        </div>
+    <div className="min-h-screen pb-28 md:pb-10 print:pb-0">
+      <header className="sticky top-0 z-40 border-b border-line bg-surface/95 backdrop-blur print:hidden">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-4 sm:px-8">
+          <div className="flex min-w-0 items-center gap-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/icon.png" alt="" className="h-9 w-9 rounded-lg" />
+            <div className="min-w-0 leading-tight">
+              <p className="font-display font-semibold text-ink">ClassKim</p>
+              <p className="truncate text-sm text-ink-soft">הפלאנר של {firstName}</p>
+            </div>
+          </div>
 
-        <button onClick={handleLogout} className="text-slate-400 hover:text-red-500 bg-slate-50 p-2.5 rounded-xl transition-colors" title="התנתק">
-          <LogOut className="w-5 h-5" />
-        </button>
+          <nav className="hidden h-full md:flex" aria-label="ניווט ראשי">
+            {TABS.map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => changeTab(tab.id)}
+                aria-current={activeTab === tab.id ? 'page' : undefined}
+                className={`flex items-center gap-2 border-b-2 px-4 text-sm font-semibold transition-colors ${activeTab === tab.id ? 'border-brand-600 text-brand-700' : 'border-transparent text-ink-soft hover:text-ink'}`}
+              >
+                <tab.icon className="h-4 w-4" aria-hidden /> {tab.label}
+              </button>
+            ))}
+          </nav>
+
+          <button onClick={handleLogout} className={iconButton} title="התנתקות" aria-label="התנתקות">
+            <LogOut className="h-5 w-5" />
+          </button>
+        </div>
       </header>
 
-      {/* תוכן מרכזי */}
-      <div className="max-w-6xl mx-auto space-y-6 print:max-w-full">
-        {user && activeTab === 'overview' && <OverviewDashboard teacherId={user.id} teacherName={fullName} />}
-        {user && activeTab === 'planner' && <DailyPlanner teacherId={user.id} />}
+      <main className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-8 sm:py-8 print:max-w-full print:p-0">
+        {user && activeTab === 'overview' && <OverviewDashboard teacherId={user.id} teacherName={firstName} daysOff={profile.days_off ?? []} onOpenPlanner={() => changeTab('planner')} />}
+        {user && activeTab === 'planner' && <DailyPlanner teacherId={user.id} daysOff={profile.days_off ?? []} onDirtyChange={setPlannerDirty} />}
         {user && activeTab === 'history' && <ClassHistory teacherId={user.id} />}
-        {user && activeTab === 'settings' && <><ClassesManager teacherId={user.id} /><BaseSchedule teacherId={user.id} /></>}
-      </div>
+        {user && activeTab === 'settings' && (
+          <>
+            <ClassesManager teacherId={user.id} onChange={() => setClassesVersion(v => v + 1)} />
+            <BaseSchedule teacherId={user.id} daysOff={profile.days_off ?? []} classesVersion={classesVersion} />
+            <ProfileSettings profile={profile} onSaved={setProfile} />
+          </>
+        )}
+      </main>
 
-      {/* תפריט ניווט תחתון אפליקטיבי - רק במסכים קטנים */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-xl border-t border-slate-200 flex justify-around items-center pb-safe pt-2 px-2 z-50 shadow-[0_-10px_40px_rgba(0,0,0,0.05)]">
-        {tabs.map(tab => {
+      <nav className="pb-safe fixed inset-x-0 bottom-0 z-50 flex justify-around border-t border-line bg-surface/95 px-2 pt-1.5 backdrop-blur md:hidden print:hidden" aria-label="ניווט ראשי">
+        {TABS.map(tab => {
           const isActive = activeTab === tab.id;
           return (
-            <button 
-              key={tab.id} 
-              onClick={() => setActiveTab(tab.id as any)}
-              className={`flex flex-col items-center justify-center w-16 h-14 rounded-2xl transition-all ${isActive ? 'text-indigo-600' : 'text-slate-400'}`}
+            <button
+              key={tab.id}
+              onClick={() => changeTab(tab.id)}
+              aria-current={isActive ? 'page' : undefined}
+              className={`flex h-14 w-16 flex-col items-center justify-center gap-1 rounded-xl text-xs ${isActive ? 'font-bold text-brand-700' : 'font-medium text-ink-soft'}`}
             >
-              <div className={`p-1.5 rounded-xl transition-all ${isActive ? 'bg-indigo-50 scale-110' : 'scale-100'}`}>
-                <tab.icon className={`w-5 h-5 ${isActive ? 'stroke-[2.5px]' : 'stroke-2'}`} />
-              </div>
-              <span className={`text-[10px] mt-1 transition-all ${isActive ? 'font-bold' : 'font-medium'}`}>{tab.label}</span>
+              <span className={`flex h-7 w-12 items-center justify-center rounded-full ${isActive ? 'bg-brand-100' : ''}`}>
+                <tab.icon className="h-5 w-5" aria-hidden />
+              </span>
+              {tab.label}
             </button>
           );
         })}

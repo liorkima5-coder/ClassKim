@@ -1,390 +1,502 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
-import { Loader2, ChevronRight, ChevronLeft, Save, Calendar as CalendarIcon, CalendarDays, LayoutTemplate, Printer, Plus, X, CheckCircle2 } from 'lucide-react';
+import {
+  DAY_NAMES, PERIODS, SCHOOL_DAYS, addDays, classColor, dayOfWeek, errorMessage, fromDateKey, isDayOff, startOfWeek, toDateKey,
+  type BaseScheduleItem, type ClassItem, type PlannerEvent,
+} from '../lib/planner';
+import { Panel, Spinner, ErrorNote, Modal, iconButton, labelClass, inputClass, primaryButton, secondaryButton } from './ui';
+import { ChevronRight, ChevronLeft, Save, Printer, Plus, CheckCircle2, Loader2, MapPin, Coffee, X } from 'lucide-react';
 
-interface BaseScheduleItem { id: string; day_of_week: number; period: number; class_id: string; room: string | null; my_classes: { class_name: string }; }
-interface PlannerEvent { id?: string; date: string; period: number; topic: string; notes: string; class_id?: string; my_classes?: { class_name: string }; }
-interface ClassItem { id: string; class_name: string; }
 type ViewMode = 'daily' | 'weekly' | 'monthly';
+type EventsMap = Record<string, Record<number, PlannerEvent>>;
 
-export default function DailyPlanner({ teacherId }: { teacherId: string }) {
-  const [currentDate, setCurrentDate] = useState<Date>(new Date());
+interface LessonSlot {
+  period: number;
+  classId: string;
+  room: string | null;
+  isExtra: boolean; // שיעור שאינו לפי המערכת הקבועה (החלפה / מילוי מקום)
+}
+
+const VIEWS: { id: ViewMode; label: string }[] = [
+  { id: 'daily', label: 'יום' },
+  { id: 'weekly', label: 'שבוע' },
+  { id: 'monthly', label: 'חודש' },
+];
+
+function rangeFor(date: Date, view: ViewMode): [Date, Date] {
+  if (view === 'weekly') {
+    const start = startOfWeek(date);
+    return [start, addDays(start, 6)];
+  }
+  if (view === 'monthly') {
+    return [new Date(date.getFullYear(), date.getMonth(), 1), new Date(date.getFullYear(), date.getMonth() + 1, 0)];
+  }
+  return [date, date];
+}
+
+interface PlannerData {
+  baseSchedule: BaseScheduleItem[];
+  classes: ClassItem[];
+  events: EventsMap;
+  failed: boolean;
+}
+
+async function loadPlannerData(teacherId: string, fromKey: string, toKey: string): Promise<PlannerData> {
+  const [scheduleRes, classesRes, eventsRes] = await Promise.all([
+    supabase.from('base_schedule').select('id, day_of_week, period, class_id, room').eq('teacher_id', teacherId),
+    supabase.from('my_classes').select('id, class_name').eq('teacher_id', teacherId).order('created_at', { ascending: true }),
+    supabase.from('planner_events').select('id, date, period, topic, notes, class_id').eq('teacher_id', teacherId).gte('date', fromKey).lte('date', toKey),
+  ]);
+
+  const events: EventsMap = {};
+  for (const ev of (eventsRes.data ?? []) as PlannerEvent[]) {
+    const key = ev.date.slice(0, 10);
+    (events[key] ??= {})[ev.period] = { ...ev, date: key, topic: ev.topic ?? '', notes: ev.notes ?? '' };
+  }
+
+  return {
+    baseSchedule: (scheduleRes.data ?? []) as BaseScheduleItem[],
+    classes: (classesRes.data ?? []) as ClassItem[],
+    events,
+    failed: !!(scheduleRes.error || classesRes.error || eventsRes.error),
+  };
+}
+
+export default function DailyPlanner({ teacherId, daysOff, onDirtyChange }: {
+  teacherId: string;
+  daysOff: number[];
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
+  const [currentDate, setCurrentDate] = useState<Date>(() => new Date());
   const [view, setView] = useState<ViewMode>('daily');
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
-  
-  const [baseSchedule, setBaseSchedule] = useState<BaseScheduleItem[]>([]);
-  const [events, setEvents] = useState<Record<string, Record<number, PlannerEvent>>>({});
-  const [classes, setClasses] = useState<ClassItem[]>([]);
+  const [error, setError] = useState('');
 
-  // States עבור המודאל של הוספת שיעור דינמי
+  const [baseSchedule, setBaseSchedule] = useState<BaseScheduleItem[]>([]);
+  const [classes, setClasses] = useState<ClassItem[]>([]);
+  const [events, setEvents] = useState<EventsMap>({});
+  const [dirtyDates, setDirtyDates] = useState<Set<string>>(new Set());
+
   const [isExtraModalOpen, setIsExtraModalOpen] = useState(false);
   const [extraPeriod, setExtraPeriod] = useState<number>(1);
   const [extraClassId, setExtraClassId] = useState<string>('');
 
-  const dayNames = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
-  const formatDateForDB = (date: Date) => { const d = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)); return d.toISOString().split('T')[0]; };
-  const getStartOfWeek = (date: Date) => { const d = new Date(date); const diff = d.getDate() - d.getDay(); return new Date(d.setDate(diff)); };
-  const getStartOfMonth = (date: Date) => new Date(date.getFullYear(), date.getMonth(), 1);
+  const isDirty = dirtyDates.size > 0;
+  const [rangeStart, rangeEnd] = rangeFor(currentDate, view);
+  const rangeStartKey = toDateKey(rangeStart);
+  const rangeEndKey = toDateKey(rangeEnd);
+  const knownClassIds = new Set(classes.map(c => c.id));
 
-  useEffect(() => { fetchData(); }, [currentDate, view, teacherId]);
+  useEffect(() => { onDirtyChange?.(isDirty); }, [isDirty, onDirtyChange]);
 
-  const fetchData = async () => {
-    setLoading(true);
-    
-    // 1. שליפת מערכת בסיסית
-    const { data: scheduleData } = await supabase.from('base_schedule').select('id, day_of_week, period, class_id, room, my_classes(class_name)').eq('teacher_id', teacherId);
-    if (scheduleData) setBaseSchedule(scheduleData as unknown as BaseScheduleItem[]);
+  // אזהרה לפני סגירת הדף עם שינויים שלא נשמרו
+  useEffect(() => {
+    if (!isDirty) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [isDirty]);
 
-    // 2. שליפת רשימת כל הכיתות לטובת מודאל השיבוץ הדינמי
-    const { data: classesData } = await supabase.from('my_classes').select('*').eq('teacher_id', teacherId);
-    if (classesData) setClasses(classesData);
+  const applyData = useCallback((data: PlannerData) => {
+    setError(data.failed ? 'חלק מהנתונים לא נטענו. רענני את הדף כדי לנסות שוב.' : '');
+    setBaseSchedule(data.baseSchedule);
+    setClasses(data.classes);
+    setEvents(data.events);
+    setDirtyDates(new Set());
+    setLoading(false);
+  }, []);
 
-    let startDate = new Date(currentDate); let endDate = new Date(currentDate);
-    if (view === 'weekly') { startDate = getStartOfWeek(currentDate); endDate = new Date(startDate); endDate.setDate(startDate.getDate() + 6); }
-    else if (view === 'monthly') { startDate = getStartOfMonth(currentDate); endDate = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0); }
+  useEffect(() => {
+    let active = true;
+    loadPlannerData(teacherId, rangeStartKey, rangeEndKey).then(data => { if (active) applyData(data); });
+    return () => { active = false; };
+  }, [teacherId, rangeStartKey, rangeEndKey, applyData]);
 
-    // 3. שליפת האירועים ביומן (כולל class_id במקרה של שיעורים דינמיים)
-    const { data: eventsData } = await supabase.from('planner_events').select('*, my_classes(class_name)').eq('teacher_id', teacherId).gte('date', formatDateForDB(startDate)).lte('date', formatDateForDB(endDate));
-    const eventsMap: Record<string, Record<number, PlannerEvent>> = {};
-    if (eventsData) { 
-      eventsData.forEach((ev: any) => { 
-        const dateKey = typeof ev.date === 'string' ? ev.date.split('T')[0] : ev.date;
-        if (!eventsMap[dateKey]) eventsMap[dateKey] = {}; 
-        eventsMap[dateKey][ev.period] = { ...ev, date: dateKey }; 
-      }); 
+  const refresh = () => loadPlannerData(teacherId, rangeStartKey, rangeEndKey).then(applyData);
+
+  /** השיעורים של תאריך מסוים: המערכת הקבועה + שינויים שנרשמו ביומן */
+  const lessonsFor = (date: Date): LessonSlot[] => {
+    const key = toDateKey(date);
+    const dayEvents = events[key] ?? {};
+    const off = isDayOff(date, daysOff);
+    const base = off ? [] : baseSchedule.filter(s => s.day_of_week === dayOfWeek(date));
+    const slots: LessonSlot[] = [];
+    for (const period of PERIODS) {
+      const baseLesson = base.find(b => b.period === period);
+      const ev = dayEvents[period];
+      const evClass = ev?.class_id && knownClassIds.has(ev.class_id) ? ev.class_id : null;
+      const classId = evClass ?? baseLesson?.class_id;
+      if (!classId) continue;
+      slots.push({
+        period,
+        classId,
+        room: baseLesson?.class_id === classId ? baseLesson.room : null,
+        isExtra: !!evClass && evClass !== baseLesson?.class_id,
+      });
     }
-    setEvents(eventsMap); setLoading(false);
+    return slots;
   };
 
-  const handleEventChange = (dateStr: string, period: number, field: 'topic' | 'notes', value: string) => {
-    setEvents(prev => { const newEvents = { ...prev }; if (!newEvents[dateStr]) newEvents[dateStr] = {}; newEvents[dateStr][period] = { ...newEvents[dateStr][period], date: dateStr, period, [field]: value }; return newEvents; });
+  const updateEvent = (dateKey: string, period: number, patch: Partial<PlannerEvent>) => {
+    setEvents(prev => {
+      const day = { ...(prev[dateKey] ?? {}) };
+      const prevEvent = day[period];
+      day[period] = { topic: prevEvent?.topic ?? '', notes: prevEvent?.notes ?? '', class_id: prevEvent?.class_id ?? null, id: prevEvent?.id, date: dateKey, period, ...patch };
+      return { ...prev, [dateKey]: day };
+    });
+    setDirtyDates(prev => new Set(prev).add(dateKey));
+    setSaveSuccess(false);
   };
 
-  // הוספת שיעור דינמי שאינו במערכת השעות הקבועה
+  const confirmDiscard = () => !isDirty || confirm('יש שינויים שלא נשמרו. להמשיך בלי לשמור?');
+
+  const goTo = (date: Date, nextView: ViewMode = view) => {
+    if (!confirmDiscard()) return;
+    setCurrentDate(date);
+    setView(nextView);
+  };
+
+  const shift = (amount: number) => {
+    const d = new Date(currentDate);
+    if (view === 'daily') d.setDate(d.getDate() + amount);
+    if (view === 'weekly') d.setDate(d.getDate() + amount * 7);
+    if (view === 'monthly') d.setMonth(d.getMonth() + amount, 1);
+    goTo(d);
+  };
+
   const handleAddDynamicClass = () => {
     if (!extraClassId) return;
-    const dateStr = formatDateForDB(currentDate);
-    
-    setEvents(prev => {
-      const newEvents = { ...prev };
-      if (!newEvents[dateStr]) newEvents[dateStr] = {};
-      newEvents[dateStr][extraPeriod] = {
-        ...newEvents[dateStr][extraPeriod],
-        date: dateStr,
-        period: extraPeriod,
-        class_id: extraClassId
-      };
-      return newEvents;
-    });
-    
+    updateEvent(toDateKey(currentDate), extraPeriod, { class_id: extraClassId });
     setIsExtraModalOpen(false);
+    setExtraClassId('');
   };
 
-  const saveDailyPlanner = async () => {
-    setIsSaving(true); 
-    const dateStr = formatDateForDB(currentDate); 
-    const dailyEvents = events[dateStr] || {};
-    
-    const upsertData = Object.values(dailyEvents)
-      .filter(ev => ev.topic?.trim() || ev.notes?.trim() || ev.class_id)
-      .map(ev => ({ 
-        teacher_id: teacherId, 
-        date: dateStr, 
-        period: ev.period, 
-        topic: ev.topic || '', 
-        notes: ev.notes || '',
-        class_id: ev.class_id || null
-      }));
-      
-    if (upsertData.length > 0) { 
-      const { error } = await supabase.from('planner_events').upsert(upsertData, { onConflict: 'teacher_id,date,period' }); 
-      if (error) {
-        alert('שגיאה בשמירה: ' + error.message);
-        setIsSaving(false);
-        return;
-      }
-    }
-    await fetchData();
-    setIsSaving(false);
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 2500);
+  const removeExtraLesson = (period: number) => {
+    // אם אין בשעה הזו שיעור קבוע, גם מה שנכתב לשיעור החד-פעמי נמחק איתו
+    const hasBaseLesson = !isDayOff(currentDate, daysOff) && baseSchedule.some(s => s.day_of_week === dayOfWeek(currentDate) && s.period === period);
+    updateEvent(toDateKey(currentDate), period, hasBaseLesson ? { class_id: null } : { class_id: null, topic: '', notes: '' });
   };
 
-  const changeDate = (amount: number) => { const newDate = new Date(currentDate); if (view === 'daily') newDate.setDate(newDate.getDate() + amount); if (view === 'weekly') newDate.setDate(newDate.getDate() + (amount * 7)); if (view === 'monthly') newDate.setMonth(newDate.getMonth() + amount); setCurrentDate(newDate); };
+  const save = async () => {
+    setIsSaving(true);
+    setError('');
+    try {
+      for (const dateKey of dirtyDates) {
+        const date = fromDateKey(dateKey);
+        const slots = lessonsFor(date);
+        const base = isDayOff(date, daysOff) ? [] : baseSchedule.filter(s => s.day_of_week === dayOfWeek(date));
 
-  const isWeekend = currentDate.getDay() === 6;
-  const currentDBDate = formatDateForDB(currentDate);
-  const dayEvents = events[currentDBDate] || {};
+        for (const ev of Object.values(events[dateKey] ?? {})) {
+          const slot = slots.find(s => s.period === ev.period);
+          const baseClass = base.find(b => b.period === ev.period)?.class_id ?? null;
+          const topic = ev.topic?.trim() ?? '';
+          const notes = ev.notes?.trim() ?? '';
+          // תמיד שומרים את הכיתה בפועל, כדי שההיסטוריה לא תשתנה אם המערכת הקבועה תשתנה בהמשך
+          const classId = slot?.classId ?? null;
+          const isEmpty = !topic && !notes && (!classId || classId === baseClass);
 
-  // בניית המערכת היומית: מיזוג של המערכת הקבועה עם שינויים דינמיים מאותו יום
-  const activeDailyPeriods = [];
-  if (view === 'daily' && !isWeekend) {
-    const dailyBase = baseSchedule.filter(s => s.day_of_week === currentDate.getDay() + 1);
-    
-    for (let p = 1; p <= 10; p++) {
-      const baseCls = dailyBase.find(s => s.period === p);
-      const ev = dayEvents[p];
+          if (isEmpty) {
+            if (ev.id) {
+              const { error: delError } = await supabase.from('planner_events').delete().eq('id', ev.id);
+              if (delError) throw delError;
+            }
+            continue;
+          }
 
-      if (ev && ev.class_id) {
-        const className = ev.my_classes?.class_name || classes.find(c => c.id === ev.class_id)?.class_name || 'כיתה לא ידועה';
-        activeDailyPeriods.push({ period: p, class_id: ev.class_id, class_name: className, isExtra: true });
-      } else if (baseCls) {
-        activeDailyPeriods.push({ period: p, class_id: baseCls.class_id, class_name: baseCls.my_classes.class_name, isExtra: false });
+          const row = { teacher_id: teacherId, date: dateKey, period: ev.period, topic, notes, class_id: classId };
+          const { error: saveError } = ev.id
+            ? await supabase.from('planner_events').update(row).eq('id', ev.id)
+            : await supabase.from('planner_events').insert([row]);
+          if (saveError) throw saveError;
+        }
       }
+      await refresh();
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2500);
+    } catch (e) {
+      setError(`השמירה נכשלה: ${errorMessage(e)}`);
+    } finally {
+      setIsSaving(false);
     }
-    activeDailyPeriods.sort((a, b) => a.period - b.period);
-  }
+  };
+
+  const todayKey = toDateKey(new Date());
+  const currentKey = toDateKey(currentDate);
+  const dayEvents = events[currentKey] ?? {};
+  const dayOff = isDayOff(currentDate, daysOff);
+  const dailyLessons = view === 'daily' ? lessonsFor(currentDate) : [];
+  const className = (id: string) => classes.find(c => c.id === id)?.class_name ?? 'כיתה';
+  // בתצוגה השבועית מציגים שורות רק עד השיעור האחרון שיש בשבוע (לפחות 6)
+  const weekLastPeriod = view === 'weekly'
+    ? Math.max(6, ...SCHOOL_DAYS.flatMap(day => lessonsFor(addDays(rangeStart, day - 1)).map(l => l.period)))
+    : 10;
+  const weekPeriods = PERIODS.filter(p => p <= weekLastPeriod);
+
+  const title =
+    view === 'daily' ? `יום ${DAY_NAMES[currentDate.getDay()]}, ${currentDate.toLocaleDateString('he-IL', { day: 'numeric', month: 'long' })}`
+      : view === 'weekly' ? `${rangeStart.toLocaleDateString('he-IL', { day: 'numeric', month: 'numeric' })} – ${addDays(rangeStart, 5).toLocaleDateString('he-IL', { day: 'numeric', month: 'numeric', year: 'numeric' })}`
+        : currentDate.toLocaleDateString('he-IL', { month: 'long', year: 'numeric' });
 
   return (
-    <div className="bg-white rounded-3xl shadow-lg shadow-slate-200/50 border border-slate-200 overflow-hidden print:shadow-none print:border-none relative">
-      
-      {/* כלי ניווט עליונים */}
-      <div className="bg-slate-50/80 border-b border-slate-200 p-4 sm:p-6 print:hidden">
-        <div className="flex flex-col xl:flex-row justify-between items-center gap-4">
-          <div className="flex bg-slate-200/60 p-1 rounded-xl w-full xl:w-auto overflow-x-auto scrollbar-hide">
-            {[{ id: 'daily', icon: LayoutTemplate, label: 'יומי' }, { id: 'weekly', icon: CalendarDays, label: 'שבועי' }, { id: 'monthly', icon: CalendarIcon, label: 'חודשי' }].map((v) => (
-              <button key={v.id} onClick={() => setView(v.id as ViewMode)} className={`flex-1 xl:flex-none flex justify-center items-center gap-2 px-3 sm:px-4 py-2.5 rounded-lg text-sm font-semibold transition-all whitespace-nowrap ${view === v.id ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500'}`}>
-                <v.icon className="w-4 h-4 hidden sm:block" /> {v.label}
+    <Panel className="relative">
+      {/* סרגל ניווט */}
+      <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between print:hidden">
+        <div className="flex items-center gap-1">
+          <button onClick={() => shift(-1)} className={iconButton} aria-label="הקודם"><ChevronRight className="h-5 w-5" /></button>
+          <button onClick={() => shift(1)} className={iconButton} aria-label="הבא"><ChevronLeft className="h-5 w-5" /></button>
+          <h2 className="ms-2 font-display text-xl font-semibold text-ink sm:text-2xl">{title}</h2>
+          {view === 'daily' && currentKey !== todayKey && (
+            <button onClick={() => goTo(new Date())} className="ms-3 rounded-lg px-2.5 py-1 text-sm font-semibold text-brand-700 hover:bg-brand-50">להיום</button>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="grid flex-1 grid-cols-3 rounded-xl bg-line-soft p-1 lg:flex-none" role="tablist" aria-label="תצוגה">
+            {VIEWS.map(v => (
+              <button
+                key={v.id}
+                role="tab"
+                aria-selected={view === v.id}
+                onClick={() => view !== v.id && goTo(currentDate, v.id)}
+                className={`rounded-lg px-4 py-1.5 text-sm font-semibold transition-colors ${view === v.id ? 'bg-surface text-brand-700 shadow-sm' : 'text-ink-soft hover:text-ink'}`}
+              >
+                {v.label}
               </button>
             ))}
-            <button onClick={() => window.print()} className="hidden md:flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold text-slate-600 bg-slate-100 ml-2"><Printer className="w-4 h-4" /> הדפס</button>
           </div>
-
-          <div className="flex items-center justify-between w-full xl:w-auto gap-2 sm:gap-6 bg-white xl:bg-transparent p-2 xl:p-0 rounded-2xl xl:rounded-none border xl:border-transparent border-slate-100">
-            <button onClick={() => changeDate(-1)} className="p-3 hover:bg-slate-100 rounded-xl transition-all"><ChevronRight className="w-5 h-5" /></button>
-            <div className="text-center flex-1">
-              <h2 className="text-lg sm:text-xl font-bold text-slate-800">
-                {view === 'daily' && currentDate.toLocaleDateString('he-IL')}
-                {view === 'weekly' && `שבוע של ${getStartOfWeek(currentDate).toLocaleDateString('he-IL', {day: '2-digit', month: '2-digit'})}`}
-                {view === 'monthly' && currentDate.toLocaleDateString('he-IL', { month: 'long', year: 'numeric' })}
-              </h2>
-              {view === 'daily' && <p className="text-indigo-600 text-xs sm:text-sm font-medium">יום {dayNames[currentDate.getDay()]}</p>}
-            </div>
-            <button onClick={() => changeDate(1)} className="p-3 hover:bg-slate-100 rounded-xl transition-all"><ChevronLeft className="w-5 h-5" /></button>
-          </div>
+          <button onClick={() => window.print()} className={`${iconButton} hidden md:inline-flex`} aria-label="הדפסה" title="הדפסה">
+            <Printer className="h-5 w-5" />
+          </button>
         </div>
       </div>
 
-      <div className="p-4 sm:p-6 print:p-0">
-        {loading ? <div className="flex justify-center py-20 print:hidden"><Loader2 className="w-10 h-10 animate-spin text-indigo-600" /></div> : (
-          <>
-            {/* DAILY VIEW (תצוגה יומית דינמית) */}
-            {view === 'daily' && (
-              <div className="space-y-4 pb-24 md:pb-6">
-                {isWeekend ? (
-                  <div className="text-center py-20 text-slate-400">יום שבת - מנוחה!</div>
-                ) : activeDailyPeriods.length === 0 ? (
-                  <div className="text-center py-20 bg-slate-50 text-slate-500 rounded-3xl border-2 border-dashed border-slate-200">לא מוגדרים שיעורים להיום.</div>
-                ) : (
-                  <>
-                    {activeDailyPeriods.map((classData) => {
-                      const period = classData.period;
-                      const eventData = dayEvents[period] || { topic: '', notes: '' };
-                      return (
-                        <div key={period} className={`flex flex-col md:flex-row gap-4 items-stretch bg-white p-4 rounded-3xl border shadow-sm ${classData.isExtra ? 'border-amber-200 ring-2 ring-amber-50' : 'border-slate-100'}`}>
-                          <div className={`w-full md:w-36 flex flex-col justify-center items-center p-4 rounded-2xl border relative overflow-hidden ${classData.isExtra ? 'bg-gradient-to-br from-amber-50 to-amber-100/50 border-amber-200' : 'bg-indigo-50/50 border-indigo-100/50'}`}>
-                            {classData.isExtra && (
-                              <div className="absolute top-0 w-full bg-amber-400 text-[10px] font-black text-amber-900 text-center py-0.5 shadow-sm">שיעור דינמי</div>
-                            )}
-                            <span className={`text-xs font-bold mb-1 ${classData.isExtra ? 'text-amber-600 mt-3' : 'text-indigo-400'}`}>שיעור {period}</span>
-                            <span className={`text-2xl font-black text-center ${classData.isExtra ? 'text-amber-900' : 'text-indigo-800'}`}>{classData.class_name}</span>
-                          </div>
-                          
-                          <div className="flex-1 space-y-2">
-                            <input type="text" placeholder="מה נלמד היום? (נושא)" value={eventData.topic || ''} onChange={(e) => handleEventChange(currentDBDate, period, 'topic', e.target.value)} className="w-full p-4 bg-slate-50 rounded-2xl outline-none font-medium border border-transparent focus:bg-white focus:border-indigo-300 transition-all" />
-                            <textarea placeholder="הערות ורפלקציה..." value={eventData.notes || ''} onChange={(e) => handleEventChange(currentDBDate, period, 'notes', e.target.value)} rows={2} className="w-full p-4 bg-slate-50 rounded-2xl outline-none text-sm resize-none border border-transparent focus:bg-white focus:border-indigo-300 transition-all" />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
+      <h2 className="mb-4 hidden font-display text-2xl font-semibold print:block">{title}</h2>
 
-                {!isWeekend && (
-                  <div className="flex flex-col sm:flex-row justify-between items-center mt-8 gap-4">
-                    <button 
-                      onClick={() => setIsExtraModalOpen(true)}
-                      className="text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all w-full sm:w-auto"
-                    >
-                      <Plus className="w-5 h-5" /> שיבוץ דינמי (החלפה / מילוי מקום)
-                    </button>
-                    
-                    <button 
-                      onClick={saveDailyPlanner} 
-                      disabled={isSaving || saveSuccess} 
-                      className={`shadow-2xl px-8 py-4 rounded-full font-bold flex items-center justify-center gap-3 w-full sm:w-auto active:scale-95 transition-all ${saveSuccess ? 'bg-emerald-500 text-white shadow-emerald-300/50' : 'bg-indigo-600 text-white shadow-indigo-300/50'}`}
-                    >
-                      {isSaving ? <Loader2 className="w-6 h-6 animate-spin" /> : saveSuccess ? <CheckCircle2 className="w-6 h-6" /> : <Save className="w-6 h-6" />} 
-                      {saveSuccess ? 'נשמר בהצלחה!' : 'שמור תכנון יומי'}
-                    </button>
-                  </div>
-                )}
+      {error && <div className="mb-4"><ErrorNote>{error}</ErrorNote></div>}
+
+      {loading ? <Spinner /> : (
+        <>
+          {/* תצוגה יומית */}
+          {view === 'daily' && (
+            <div className="space-y-3">
+              {dayOff && (
+                <div className="flex items-center gap-3 rounded-xl bg-marker-50 px-4 py-3 text-marker-700">
+                  <Coffee className="h-5 w-5 shrink-0" aria-hidden />
+                  <p className="font-semibold">
+                    {currentDate.getDay() === 6 ? 'שבת. אין שיעורים במערכת.' : 'יום חופשי. אין שיעורים מהמערכת הקבועה.'}
+                    {' '}אפשר עדיין להוסיף שיעור חד-פעמי.
+                  </p>
+                </div>
+              )}
+
+              {dailyLessons.length === 0 && !dayOff && (
+                <div className="rounded-xl border-2 border-dashed border-line p-8 text-center text-ink-soft">
+                  אין שיעורים במערכת ביום הזה. אפשר להוסיף שיעור חד-פעמי, או להגדיר את מערכת השעות בלשונית ההגדרות.
+                </div>
+              )}
+
+              {dailyLessons.map(lesson => {
+                const ev = dayEvents[lesson.period];
+                const color = classColor(classes, lesson.classId);
+                return (
+                  <article
+                    key={lesson.period}
+                    className={`grid gap-3 rounded-xl border p-3 sm:grid-cols-[9rem_1fr] sm:gap-5 sm:p-4 print:break-inside-avoid ${lesson.isExtra ? 'border-marker-400/60 bg-marker-50' : 'border-line bg-surface'}`}
+                  >
+                    <div className="flex items-center gap-3 sm:flex-col sm:items-start sm:gap-1.5">
+                      <span className="font-display text-sm font-semibold text-ink-faint">שיעור {lesson.period}</span>
+                      <span className={`rounded-lg border px-2.5 py-1 font-display text-lg font-semibold ${color.chip}`}>{className(lesson.classId)}</span>
+                      {lesson.room && <span className="flex items-center gap-1 text-xs text-ink-soft"><MapPin className="h-3 w-3" aria-hidden />{lesson.room}</span>}
+                      {lesson.isExtra && (
+                        <span className="ms-auto flex items-center gap-1 sm:ms-0">
+                          <span className="rounded bg-marker-100 px-1.5 text-xs font-semibold text-marker-700">שינוי במערכת</span>
+                          <button onClick={() => removeExtraLesson(lesson.period)} className="rounded p-0.5 text-marker-700 hover:bg-marker-100" aria-label={`ביטול השינוי בשיעור ${lesson.period}`} title="ביטול השינוי">
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </span>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <label className="sr-only" htmlFor={`topic-${lesson.period}`}>נושא השיעור</label>
+                      <input
+                        id={`topic-${lesson.period}`}
+                        placeholder="מה לומדים בשיעור?"
+                        value={ev?.topic ?? ''}
+                        onChange={e => updateEvent(currentKey, lesson.period, { topic: e.target.value })}
+                        className={`${inputClass} font-semibold`}
+                      />
+                      <label className="sr-only" htmlFor={`notes-${lesson.period}`}>הערות</label>
+                      <textarea
+                        id={`notes-${lesson.period}`}
+                        placeholder="הערות: ציוד, מי חסר, מה להמשיך בפעם הבאה"
+                        value={ev?.notes ?? ''}
+                        onChange={e => updateEvent(currentKey, lesson.period, { notes: e.target.value })}
+                        rows={2}
+                        className={`${inputClass} resize-y text-sm`}
+                      />
+                    </div>
+                  </article>
+                );
+              })}
+
+              <div className="sticky bottom-20 z-10 mt-6 flex items-center justify-between gap-2 rounded-2xl border border-line bg-surface/95 p-2 backdrop-blur sm:p-3 md:bottom-4 print:hidden">
+                <button onClick={() => { setExtraPeriod(1); setIsExtraModalOpen(true); }} className={`${secondaryButton} px-3 sm:px-5`}>
+                  <Plus className="h-5 w-5" aria-hidden /> שיעור חד-פעמי
+                </button>
+                <div className="flex items-center gap-3">
+                  {isDirty && !isSaving && <span className="hidden text-sm font-medium text-marker-700 sm:inline">יש שינויים שלא נשמרו</span>}
+                  <button onClick={save} disabled={isSaving || !isDirty} className={`${primaryButton} ${saveSuccess ? 'bg-success! opacity-100!' : ''}`}>
+                    {isSaving ? <Loader2 className="h-5 w-5 animate-spin" /> : saveSuccess ? <CheckCircle2 className="h-5 w-5" /> : <Save className="h-5 w-5" />}
+                    {saveSuccess ? 'נשמר' : 'שמירה'}
+                    {isDirty && !isSaving && <span className="h-2 w-2 rounded-full bg-marker-400 sm:hidden" aria-label="יש שינויים שלא נשמרו" />}
+                  </button>
+                </div>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* WEEKLY VIEW */}
-            {view === 'weekly' && (
-              <>
-                {/* Desktop Grid */}
-                <div className="hidden md:block overflow-x-auto">
-                  <table className="w-full min-w-[900px] border-collapse">
-                    <thead>
-                      <tr>
-                        <th className="p-3 bg-white w-16 border-b border-l border-slate-200"></th>
-                        {[1, 2, 3, 4, 5, 6].map(dayIdx => {
-                          const dateOfCol = new Date(getStartOfWeek(currentDate)); dateOfCol.setDate(dateOfCol.getDate() + dayIdx - 1);
+          {/* תצוגה שבועית */}
+          {view === 'weekly' && (
+            <>
+              <div className="hidden overflow-x-auto md:block">
+                <table className="w-full min-w-[56rem] border-separate border-spacing-1 table-fixed">
+                  <thead>
+                    <tr>
+                      <th className="w-10" />
+                      {SCHOOL_DAYS.map(day => {
+                        const date = addDays(rangeStart, day - 1);
+                        const isToday = toDateKey(date) === todayKey;
+                        return (
+                          <th key={day} className="pb-2 text-center font-normal">
+                            <button onClick={() => goTo(date, 'daily')} className={`rounded-lg px-3 py-1 hover:bg-line-soft ${isToday ? 'bg-brand-50 text-brand-800' : ''}`}>
+                              <span className="block font-display font-semibold">{DAY_NAMES[day - 1]}</span>
+                              <span className="text-xs text-ink-soft">{date.toLocaleDateString('he-IL', { day: 'numeric', month: 'numeric' })}{isDayOff(date, daysOff) && ' (חופשי)'}</span>
+                            </button>
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {weekPeriods.map(period => (
+                      <tr key={period}>
+                        <td className="text-center font-display text-sm font-semibold text-ink-faint">{period}</td>
+                        {SCHOOL_DAYS.map(day => {
+                          const date = addDays(rangeStart, day - 1);
+                          const off = isDayOff(date, daysOff);
+                          const lesson = lessonsFor(date).find(l => l.period === period);
+                          const topic = events[toDateKey(date)]?.[period]?.topic;
                           return (
-                            <th key={dayIdx} className="p-3 bg-slate-50 border border-slate-200 text-slate-700">
-                              {dayNames[dayIdx - 1]}<span className="block text-xs font-normal text-slate-400 mt-1">{dateOfCol.toLocaleDateString('he-IL', {day: '2-digit', month: '2-digit'})}</span>
-                            </th>
+                            <td key={day} className={`h-16 rounded-lg align-top ${off ? 'bg-marker-50' : 'bg-paper/60'}`}>
+                              {lesson && (
+                                <button onClick={() => goTo(date, 'daily')} className={`h-full w-full rounded-lg border p-1.5 text-right ${lesson.isExtra ? 'border-marker-400/60 bg-marker-50' : 'border-line bg-surface hover:border-brand-200'}`}>
+                                  <span className={`inline-block rounded border px-1.5 text-xs font-bold ${classColor(classes, lesson.classId).chip}`}>{className(lesson.classId)}</span>
+                                  <span className={`mt-1 block truncate text-xs ${topic ? 'text-ink' : 'text-ink-faint'}`}>{topic || 'לא תוכנן'}</span>
+                                </button>
+                              )}
+                            </td>
                           );
                         })}
                       </tr>
-                    </thead>
-                    <tbody>
-                      {[1,2,3,4,5,6,7,8,9,10].map(period => (
-                        <tr key={period}>
-                          <td className="p-2 text-center text-sm font-semibold text-slate-400 bg-slate-50 border-b border-l border-slate-200">{period}</td>
-                          {[1, 2, 3, 4, 5, 6].map(dayIdx => {
-                            const dateOfCol = new Date(getStartOfWeek(currentDate)); dateOfCol.setDate(dateOfCol.getDate() + dayIdx - 1);
-                            const cellEvent = events[formatDateForDB(dateOfCol)]?.[period];
-                            const baseClass = baseSchedule.find(s => s.day_of_week === dayIdx && s.period === period);
-                            
-                            // מזהה אם זה שיעור מהמערכת או דינמי
-                            const isExtra = cellEvent && cellEvent.class_id;
-                            const displayClassName = isExtra 
-                              ? (cellEvent.my_classes?.class_name || classes.find(c => c.id === cellEvent.class_id)?.class_name) 
-                              : baseClass?.my_classes.class_name;
+                    ))}
+                  </tbody>
+                </table>
+              </div>
 
+              <div className="space-y-4 md:hidden">
+                {SCHOOL_DAYS.map(day => {
+                  const date = addDays(rangeStart, day - 1);
+                  const lessons = lessonsFor(date);
+                  return (
+                    <div key={day} className="rounded-xl border border-line p-3">
+                      <button onClick={() => goTo(date, 'daily')} className="mb-2 flex w-full items-baseline justify-between">
+                        <span className="font-display font-semibold">יום {DAY_NAMES[day - 1]}</span>
+                        <span className="text-sm text-ink-soft">{date.toLocaleDateString('he-IL', { day: 'numeric', month: 'numeric' })}</span>
+                      </button>
+                      {lessons.length === 0 ? (
+                        <p className="py-2 text-sm text-ink-faint">{isDayOff(date, daysOff) ? 'יום חופשי' : 'אין שיעורים'}</p>
+                      ) : (
+                        <ul className="space-y-1.5">
+                          {lessons.map(l => {
+                            const topic = events[toDateKey(date)]?.[l.period]?.topic;
                             return (
-                              <td key={dayIdx} className="p-2 border border-slate-200 h-24 align-top">
-                                {displayClassName ? (
-                                  <div className={`rounded-lg p-2 h-full flex flex-col ${isExtra ? 'bg-amber-50 border border-amber-200' : 'bg-indigo-50/40'}`}>
-                                    <span className={`font-bold text-sm ${isExtra ? 'text-amber-800' : 'text-indigo-700'}`}>{displayClassName}</span>
-                                    {cellEvent?.topic && <span className="text-xs text-slate-700 mt-1 line-clamp-2">{cellEvent.topic}</span>}
-                                  </div>
-                                ) : null}
-                              </td>
+                              <li key={l.period} className="flex items-center gap-2 text-sm">
+                                <span className="w-4 text-center font-semibold text-ink-faint">{l.period}</span>
+                                <span className={`rounded border px-1.5 text-xs font-bold ${classColor(classes, l.classId).chip}`}>{className(l.classId)}</span>
+                                <span className={`truncate ${topic ? 'text-ink' : 'text-ink-faint'}`}>{topic || 'לא תוכנן'}</span>
+                              </li>
                             );
                           })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                
-                {/* Mobile Vertical List */}
-                <div className="md:hidden space-y-6 pb-20">
-                  {[1, 2, 3, 4, 5, 6].map(dayIdx => {
-                    const dateOfCol = new Date(getStartOfWeek(currentDate)); dateOfCol.setDate(dateOfCol.getDate() + dayIdx - 1);
-                    const dayEvents = events[formatDateForDB(dateOfCol)] || {};
-                    
-                    // בניה ומיזוג לאותו יום בנייד
-                    const dailyBase = baseSchedule.filter(s => s.day_of_week === dayIdx);
-                    const mergedDay = [];
-                    for (let p = 1; p <= 10; p++) {
-                      const baseCls = dailyBase.find(s => s.period === p);
-                      const ev = dayEvents[p];
-                      if (ev && ev.class_id) {
-                        mergedDay.push({ period: p, class_name: ev.my_classes?.class_name || classes.find(c => c.id === ev.class_id)?.class_name, isExtra: true, topic: ev.topic });
-                      } else if (baseCls) {
-                        mergedDay.push({ period: p, class_name: baseCls.my_classes.class_name, isExtra: false, topic: ev?.topic });
-                      }
-                    }
-
-                    return (
-                      <div key={dayIdx} className="bg-slate-50/50 rounded-3xl border border-slate-100 p-4">
-                        <div className="flex justify-between items-end mb-4 border-b border-slate-200 pb-2">
-                          <h3 className="font-bold text-lg text-slate-800">יום {dayNames[dayIdx - 1]}</h3>
-                          <span className="text-sm text-slate-400">{dateOfCol.toLocaleDateString('he-IL', {day: '2-digit', month: '2-digit'})}</span>
-                        </div>
-                        {mergedDay.length === 0 ? (
-                          <p className="text-sm text-slate-400 text-center py-4">אין שיעורים</p>
-                        ) : (
-                          <div className="space-y-3">
-                            {mergedDay.map(cls => (
-                                <div key={cls.period} className={`flex gap-3 bg-white p-3 rounded-2xl shadow-sm border ${cls.isExtra ? 'border-amber-200' : 'border-slate-100'}`}>
-                                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold ${cls.isExtra ? 'bg-amber-100 text-amber-700' : 'bg-indigo-50 text-indigo-600'}`}>{cls.period}</div>
-                                  <div className="flex-1">
-                                    <p className={`font-bold ${cls.isExtra ? 'text-amber-900' : 'text-slate-800'}`}>{cls.class_name} {cls.isExtra && <span className="text-[10px] bg-amber-400 text-amber-900 px-1 rounded ml-1">דינמי</span>}</p>
-                                    <p className={`text-xs mt-1 ${cls.topic ? 'text-slate-600' : 'text-slate-400 italic'}`}>{cls.topic || 'לא תוכנן נושא'}</p>
-                                  </div>
-                                </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-
-            {/* MONTHLY VIEW (Overview) */}
-            {view === 'monthly' && (
-              <div className="grid grid-cols-7 gap-1 sm:gap-2 pb-20">
-                {dayNames.map(day => <div key={day} className="text-center font-bold text-[10px] sm:text-sm text-slate-400 py-1 sm:py-2">{day}</div>)}
-                {Array.from({ length: getStartOfMonth(currentDate).getDay() }).map((_, i) => <div key={`empty-${i}`} className="h-16 sm:h-28 bg-slate-50/50 rounded-xl border border-transparent"></div>)}
-                {Array.from({ length: new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate() }).map((_, i) => {
-                  const currentDay = new Date(currentDate.getFullYear(), currentDate.getMonth(), i + 1);
-                  const dateStr = formatDateForDB(currentDay);
-                  const dayEvents = events[dateStr];
-                  const plannedCount = dayEvents ? Object.values(dayEvents).filter(e => e.topic).length : 0;
-                  const isToday = formatDateForDB(new Date()) === dateStr;
-                  return (
-                    <div key={i} onClick={() => { setCurrentDate(currentDay); setView('daily'); }} className={`h-16 sm:h-28 p-1 sm:p-2 rounded-xl sm:rounded-2xl border transition-all cursor-pointer flex flex-col ${isToday ? 'border-indigo-500 bg-indigo-50/30' : 'border-slate-100 bg-white hover:border-indigo-300'}`}>
-                      <span className={`text-xs sm:text-sm font-bold w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-full mb-1 sm:mb-2 ${isToday ? 'bg-indigo-600 text-white' : 'text-slate-600'}`}>{i + 1}</span>
-                      {plannedCount > 0 && <span className="mt-auto text-[9px] sm:text-xs font-medium text-indigo-600 bg-indigo-100 px-1 sm:px-2 py-0.5 sm:py-1 rounded-md text-center truncate">{plannedCount} ש׳</span>}
+                        </ul>
+                      )}
                     </div>
                   );
                 })}
               </div>
-            )}
-          </>
-        )}
-      </div>
+            </>
+          )}
 
-      {/* מודאל הוספת שיעור דינמי */}
-      {isExtraModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-100 transform transition-all pb-safe">
-            <div className="flex justify-between items-center p-6 border-b border-slate-100 bg-amber-50/50">
-              <div>
-                <h3 className="font-bold text-amber-900 text-lg">שיבוץ דינמי להיום</h3>
-                <p className="text-xs text-amber-700/70 mt-1 font-medium">הוספה או החלפה של שיעור קיים</p>
-              </div>
-              <button onClick={() => setIsExtraModalOpen(false)} className="text-slate-400 hover:text-slate-700 bg-white p-2 rounded-full border border-slate-200"><X className="w-5 h-5" /></button>
+          {/* תצוגה חודשית */}
+          {view === 'monthly' && (
+            <div className="grid grid-cols-7 gap-1 sm:gap-2">
+              {DAY_NAMES.map(d => <div key={d} className="py-1 text-center text-xs font-semibold text-ink-soft sm:text-sm">{d}</div>)}
+              {Array.from({ length: rangeStart.getDay() }).map((_, i) => <div key={`empty-${i}`} />)}
+              {Array.from({ length: rangeEnd.getDate() }).map((_, i) => {
+                const date = new Date(currentDate.getFullYear(), currentDate.getMonth(), i + 1);
+                const key = toDateKey(date);
+                const total = lessonsFor(date).length;
+                const planned = Object.values(events[key] ?? {}).filter(e => e.topic?.trim()).length;
+                const isToday = key === todayKey;
+                const off = isDayOff(date, daysOff);
+                return (
+                  <button
+                    key={key}
+                    onClick={() => goTo(date, 'daily')}
+                    className={`flex h-16 flex-col rounded-lg border p-1.5 text-right transition-colors sm:h-24 sm:p-2 ${isToday ? 'border-brand-500 bg-brand-50' : off ? 'border-transparent bg-line-soft/70' : 'border-line bg-surface hover:border-brand-200'}`}
+                  >
+                    <span className={`flex h-6 w-6 items-center justify-center rounded-full text-sm font-semibold ${isToday ? 'bg-brand-600 text-white' : 'text-ink'}`}>{i + 1}</span>
+                    {total > 0 && (planned > 0 || key <= todayKey) && (
+                      <span className={`mt-auto text-[10px] font-semibold sm:text-xs ${planned === total ? 'text-brand-700' : 'text-ink-soft'}`}>
+                        <span className="hidden sm:inline">{planned}/{total} מתוכננים</span>
+                        <span className="sm:hidden">{planned}/{total}</span>
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
-            
-            <div className="p-6 space-y-5">
-              <div>
-                <label className="block text-sm font-bold text-slate-700 mb-2">איזה שיעור ביום?</label>
-                <select value={extraPeriod} onChange={(e) => setExtraPeriod(Number(e.target.value))} className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-medium text-slate-800 appearance-none">
-                  {[1,2,3,4,5,6,7,8,9,10].map(p => <option key={p} value={p}>שיעור {p}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-bold text-slate-700 mb-2">איזו כיתה נכנסת?</label>
-                <select value={extraClassId} onChange={(e) => setExtraClassId(e.target.value)} className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-medium text-slate-800 appearance-none">
-                  <option value="">-- בחרי כיתה --</option>
-                  {classes.map(c => <option key={c.id} value={c.id}>{c.class_name}</option>)}
-                </select>
-              </div>
-              <button 
-                onClick={handleAddDynamicClass} 
-                disabled={!extraClassId} 
-                className="w-full bg-amber-500 text-white py-4 rounded-2xl font-bold flex justify-center items-center gap-2 mt-4 hover:bg-amber-600 disabled:opacity-50 transition-all shadow-lg shadow-amber-200"
-              >
-                הוסף ליומן
-              </button>
-            </div>
-          </div>
-        </div>
+          )}
+        </>
       )}
-    </div>
+
+      {isExtraModalOpen && (
+        <Modal title="שיעור חד-פעמי" subtitle="החלפה, מילוי מקום או שיעור נוסף ביום הזה בלבד" onClose={() => setIsExtraModalOpen(false)}>
+          <div>
+            <label htmlFor="extra-period" className={labelClass}>באיזה שיעור?</label>
+            <select id="extra-period" value={extraPeriod} onChange={e => setExtraPeriod(Number(e.target.value))} className={inputClass}>
+              {PERIODS.map(p => {
+                const existing = dailyLessons.find(l => l.period === p);
+                return <option key={p} value={p}>שיעור {p}{existing ? ` (במקום ${className(existing.classId)})` : ''}</option>;
+              })}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="extra-class" className={labelClass}>איזו כיתה?</label>
+            <select id="extra-class" value={extraClassId} onChange={e => setExtraClassId(e.target.value)} className={inputClass}>
+              <option value="">בחירת כיתה</option>
+              {classes.map(c => <option key={c.id} value={c.id}>{c.class_name}</option>)}
+            </select>
+            {classes.length === 0 && <p className="mt-1.5 text-sm text-ink-soft">עוד אין כיתות. מוסיפים אותן בלשונית ההגדרות.</p>}
+          </div>
+          <button onClick={handleAddDynamicClass} disabled={!extraClassId} className={`${primaryButton} w-full`}>
+            הוספה ליומן
+          </button>
+        </Modal>
+      )}
+    </Panel>
   );
 }

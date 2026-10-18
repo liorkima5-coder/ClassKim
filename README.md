@@ -1,36 +1,54 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ClassKim – הפלאנר למורים
 
-## Getting Started
+אפליקציית ווב בעברית שבה מורה מגדירה את הכיתות ואת מערכת השעות הקבועה שלה, רושמת ביומן מה לימדה בכל שיעור, ורואה לכל כיתה את ההספק לאורך השנה. אפשר להתקין אותה בטלפון כאפליקציה (PWA).
 
-First, run the development server:
+## מה יש באפליקציה
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- **היום**: השיעורים של היום לפי המערכת, כולל שינויים חד-פעמיים, ורשימת משימות להכנה.
+- **יומן**: תצוגה יומית (כתיבת נושא והערות לכל שיעור), שבועית וחודשית. אפשר להוסיף שיעור חד-פעמי (החלפה או מילוי מקום) ולהדפיס.
+- **הספק**: בוחרים כיתה ורואים את כל השיעורים שנרשמו לה, מהאחרון לראשון.
+- **הגדרות**: כיתות (לכל כיתה צבע קבוע), מערכת שעות שבועית עם חדרים, ופרטים אישיים כולל ימי חופש.
+- כניסה עם אימייל וסיסמה או עם Google, כולל איפוס סיסמה ואפשרות לא להישאר מחוברת.
+
+## טכנולוגיה
+
+- Next.js 16, React 19, TypeScript, Tailwind CSS 4
+- Supabase להתחברות ולמסד הנתונים. כל הקוד רץ בדפדפן ומדבר ישירות עם Supabase.
+
+## הרצה מקומית
+
+1. יוצרים קובץ `.env.local` עם פרטי הפרויקט ב-Supabase:
+
+   ```
+   NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
+   NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+   ```
+
+2. מתקינים ומריצים:
+
+   ```bash
+   npm install
+   npm run dev
+   ```
+
+3. פותחים את http://localhost:3000
+
+## Supabase
+
+הטבלאות שהאפליקציה משתמשת בהן: `teachers`, `my_classes`, `base_schedule`, `planner_events`, `tasks`.
+
+כדי שאיפוס סיסמה והתחברות עם Google יעבדו, צריך להוסיף ב-Supabase תחת Authentication → URL Configuration את כתובות ההפניה של האתר, למשל `https://your-site/dashboard` ו-`https://your-site/reset-password`.
+
+בקובץ [`supabase/recommended-fixes.sql`](supabase/recommended-fixes.sql) יש תיקונים מומלצים למסד הנתונים: אילוצי ייחודיות, קישור בין שיעור ביומן לכיתה, והרשאות RLS כך שכל מורה רואה רק את הנתונים שלה. האפליקציה עובדת גם בלעדיהם.
+
+## מבנה הקוד
+
 ```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+src/app/page.tsx                  מסך כניסה והרשמה
+src/app/reset-password/page.tsx   בחירת סיסמה חדשה מהקישור במייל
+src/app/dashboard/page.tsx        מסגרת האפליקציה והלשוניות
+src/components/                   המסכים: היום, יומן, הספק, כיתות, מערכת שעות, פרטים
+src/lib/planner.ts                טיפוסים, תאריכים וצבעי כיתות
+src/lib/session.ts                "להישאר מחוברת"
+src/lib/supabase.ts               חיבור ל-Supabase
+```
